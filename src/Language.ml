@@ -4,6 +4,7 @@
 open GT
 
 (* Opening a library for combinator-based syntax analysis *)
+open Ostap
 open Ostap.Combinators
        
 (* Simple expressions: syntax and semantics *)
@@ -44,18 +45,65 @@ module Expr =
        Takes a state and an expression, and returns the value of the expression in 
        the given state.
      *)                                                       
-    let eval _ _ = failwith "Not yet implemented"
+    (* Util functions for bool <-> int conversions *)
+
+    let int_to_bool n = if n == 0 then false else true
+    
+    let bool_to_int b = if b then 1 else 0
+
+    let eval_bin_op op left right = match op with
+      | "+" -> left + right
+      | "-" -> left - right
+      | "*" -> left * right
+      | "/" -> left / right
+      | "%" -> left mod right
+      | "<" -> bool_to_int (left < right)
+      | "<=" -> bool_to_int (left <= right)
+      | ">" -> bool_to_int (left > right)
+      | ">=" -> bool_to_int (left >= right)
+      | "==" -> bool_to_int (left == right)
+      | "!=" -> bool_to_int (left != right)
+      | "&&" -> bool_to_int ((int_to_bool left) && (int_to_bool right))
+      | "!!" -> bool_to_int ((int_to_bool left) || (int_to_bool right))
+      | _ -> failwith "undefined binary operator"
+
+    (* Expression evaluator
+
+          val eval : state -> t -> int
+ 
+       Takes a state and an expression, and returns the value of the expression in 
+       the given state.
+    *)
+    let rec eval state expr = match expr with
+      | Const n -> n
+      | Var x -> state x
+      | Binop (op, expr1, expr2) -> eval_bin_op op (eval state expr1) (eval state expr2)
 
     (* Expression parser. You can use the following terminals:
 
          IDENT   --- a non-empty identifier a-zA-Z[a-zA-Z0-9_]* as a string
          DECIMAL --- a decimal constant [0-9]+ as a string
-                                                                                                                  
+   
     *)
-    ostap (                                      
-      parse: empty {failwith "Not yet implemented"}
+    ostap (
+      expr:
+        !(Util.expr 
+               (fun x -> x)
+               [|
+                 `Lefta , [ostap ("!!" ), (fun x y -> Binop ("!!", x, y))];
+                 `Lefta , [ostap ("&&" ), (fun x y -> Binop ("&&", x, y))];
+                 `Nona  , [ostap ("<="), (fun x y -> Binop ("<=", x, y)); ostap ("<"), (fun x y -> Binop ("<", x, y)); 
+                           ostap (">="), (fun x y -> Binop (">=", x, y)); ostap (">"), (fun x y -> Binop (">", x, y)); 
+                           ostap ("=="), (fun x y -> Binop ("==", x, y)); ostap ("!="), (fun x y -> Binop ("!=", x, y))];
+                 `Lefta , [ostap ("+" ), (fun x y -> Binop ("+", x, y)); ostap ("-"), (fun x y -> Binop ("-", x, y))];
+                 `Lefta , [ostap ("*" ), (fun x y -> Binop ("*", x, y)); ostap ("/"), (fun x y -> Binop ("/", x, y)); 
+                           ostap ("%"), (fun x y -> Binop ("%", x, y))]
+               |]
+               primary
+        );
+      primary: x:IDENT {Var x} | n:DECIMAL {Const n} | -"(" expr -")"                     
     )
-    
+
   end
                     
 (* Simple statements: syntax and sematics *)
@@ -72,17 +120,32 @@ module Stmt =
     (* The type of configuration: a state, an input stream, an output stream *)
     type config = Expr.state * int list * int list 
 
+    let assign x e (s, i, o) = (Expr.update x (Expr.eval s e) s, i, o)
+
+    let read x (s, (z :: i), o) = ((Expr.update x z s), i, o)
+
+    let write e (s, i, o) = (s, i, o @ [Expr.eval s e])
+
     (* Statement evaluator
 
-         val eval : config -> t -> config
+          val eval : config -> t -> config
 
        Takes a configuration and a statement, and returns another configuration
     *)
-    let eval _ _ = failwith "Not yet implemented"
+    let rec eval c t = match t with
+      | Assign (x, e) -> assign x e c
+      | Read x -> read x c
+      | Write e -> write e c
+      | Seq (t, k) -> eval (eval c t) k
 
     (* Statement parser *)
     ostap (
-      parse: empty {failwith "Not yet implemented"}
+      simple_stmt:
+        x:IDENT ":=" e:!(Expr.expr) {Assign (x, e)}
+      | "read" "(" x:IDENT ")"         {Read x}
+      | "write" "(" e:!(Expr.expr) ")" {Write e};
+
+      parse: <s::ss> : !(Util.listBy)[ostap (";")][simple_stmt] {List.fold_left (fun s ss -> Seq (s, ss)) s ss}
     )
       
   end
