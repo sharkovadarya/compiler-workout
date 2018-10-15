@@ -86,7 +86,36 @@ open SM
    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
    of x86 instructions
 *)
-let compile _ = failwith "Not Implemented Yet"
+let rec compile env prog = match prog with
+    | [] -> (env, [])
+    | ins :: prog' -> let env, p = 
+      match ins with      
+        | CONST n -> let i, env = env#allocate in env, [Mov (L n, i)]    
+        | READ -> let i, env = env#allocate in env, [Call "Lread"; Mov(eax, i)]
+        | WRITE -> let x, env = env#pop in env, [Push x; Call "Lwrite"; Pop eax]        
+        | LD x -> let i, env = (env#global x)#allocate in env, [Mov (M (env#loc x), eax); Mov (eax, i)]
+        | ST x -> let s, env = (env#global x)#pop in env, [Mov (s, eax); Mov (eax, M (env#loc x))]
+        | BINOP op -> 
+          let x, y, env = env#pop2 in
+            let i, env = env#allocate in env, (match op with
+              | "+" | "-" | "*" -> [Mov (y, eax); Binop (op, x, eax); Mov (eax, i)]
+              | "/" | "%" -> let reg = if op = "/" then eax else edx in [Mov (y, eax); Cltd; IDiv x; Mov (reg, i)]
+              | "&&" | "!!" -> [Mov (L 0, eax); Binop ("cmp", y, eax); Set ("ne", "%al");
+                                Mov (L 0, edx); Binop ("cmp", x, edx); Set ("ne", "%dl");
+                                Binop (op, edx, eax); Mov (eax, i)]
+              | op -> let cmp_op = match op with 
+                | "<"  -> "l"
+                | ">"  -> "g"
+                | "<=" -> "le"
+                | ">=" -> "ge"
+                | "==" -> "e"
+                | "!=" -> "ne"
+              in [Mov (y, edx); Mov (L 0, eax); Binop ("cmp", x, edx); Set (cmp_op, "%al"); Mov (eax, i)]              
+          )
+        | LABEL l -> env, [Label l]          
+        | JMP l -> env, [Jmp l]
+        | CJMP (c, l) -> let x, env = env#pop in env, [Binop ("cmp", L 0, x); CJmp (c, l)]
+        in let env', p' = compile env prog' in env', p @ p'
 
 (* A set of strings *)           
 module S = Set.Make (String)
