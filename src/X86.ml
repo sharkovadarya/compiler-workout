@@ -90,13 +90,61 @@ open SM
    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
    of x86 instructions
 *)
-let compile env code = failwith "Not implemented"
+let rec compile env prog =  
+  match prog with
+    | [] -> (env, [])
+    | ins :: prog' -> let env, p = match ins with
+      | LD x -> let i, env = (env#global x)#allocate in env, [Mov (env#loc x, eax); Mov (eax, i)]
+      | ST x -> let v, env = (env#global x)#pop in env, [Mov (v, eax); Mov (eax, env#loc x)]
+      | CONST n -> let i, env = env#allocate in env, [Mov (L n, i)]  
+      | READ -> let i, env = env#allocate in env, [Call "Lread"; Mov(eax, i)]
+      | WRITE -> let x, env = env#pop in env, [Push x; Call "Lwrite"; Pop eax] 
+      | BINOP op -> 
+        let x, y, env = env#pop2 in
+          let i, env = env#allocate in env, (match op with
+            | "+" | "-" | "*" -> [Mov (y, eax); Binop (op, x, eax); Mov (eax, i)]
+            | "/" | "%" -> let reg = if op = "/" then eax else edx in [Mov (y, eax); Cltd; IDiv x; Mov (reg, i)]
+            | "&&" | "!!" -> [Mov (L 0, eax); Binop ("cmp", y, eax); Set ("ne", "%al");
+                              Mov (L 0, edx); Binop ("cmp", x, edx); Set ("ne", "%dl");
+                              Binop (op, edx, eax); Mov (eax, i)]
+            | op -> let cmp_op = match op with 
+              | "<"  -> "l"
+              | ">"  -> "g"
+              | "<=" -> "le"
+              | ">=" -> "ge"
+              | "==" -> "e"
+              | "!=" -> "ne"
+            in [Mov (y, edx); Mov (L 0, eax); Binop ("cmp", x, edx); Set (cmp_op, "%al"); Mov (eax, i)]              
+        )
+      | LABEL l -> env, [Label l]          
+      | JMP l -> env, [Jmp l]
+      | CJMP (c, l) -> let x, env = env#pop in env, [Binop ("cmp", L 0, x); CJmp (c, l)]
+      | BEGIN (f, args, locs) -> let env = env#enter f args locs in
+                                 env, [Push ebp; Mov (esp, ebp); Binop ("-", M ("$" ^ env#lsize), esp)]
+      | END -> env, [Label env#epilogue; Mov (ebp, esp); Pop ebp; Ret; 
+                     Meta (Printf.sprintf "\t.set %s, %d" env#lsize (env#allocated * word_size))]
+      | RET true -> let x, env' = env#pop in env', [Mov (x, eax); Jmp env#epilogue]
+      | RET false -> env, [Jmp env#epilogue]
+      | CALL (f, n, is_fun) -> let rec push env' acc = function
+                                  | 0 -> env', acc
+                                  | m -> let x, env' = env'#pop in push env' (Push x :: acc) (m - 1)
+                                in
+                                let env', push = push env [] n in
+                                let pop_res = List.rev (List.map (fun x -> Pop x) env'#live_registers) in
+                                let an, env' = env'#allocate in
+                                env', (List.map (fun x -> Push x) env'#live_registers) @ push @ [Call f; Mov (eax, an); Binop ("+", L (n * word_size), esp)] @ pop_res
+      in 
+      let env', p' = compile env prog' in env', p @ p'
                                 
 (* A set of strings *)           
 module S = Set.Make (String)
 
+let rec list_init k = match k with
+  | 0 -> []
+  | _ -> (list_init (k - 1)) @ [k - 1]
+
 (* Environment implementation *)
-let make_assoc l = List.combine l (List.init (List.length l) (fun x -> x))
+let make_assoc l = List.combine l (list_init (List.length l))
                      
 class env =
   object (self)
@@ -116,14 +164,14 @@ class env =
     (* allocates a fresh position on a symbolic stack *)
     method allocate =    
       let x, n =
-	let rec allocate' = function
-	| []                            -> ebx     , 0
-	| (S n)::_                      -> S (n+1) , n+1
-	| (R n)::_ when n < num_of_regs -> R (n+1) , stack_slots
-        | (M _)::s                      -> allocate' s
-	| _                             -> S 0     , 1
-	in
-	allocate' stack
+        let rec allocate' = function
+          | []                            -> ebx     , 0
+          | (S n)::_                      -> S (n+1) , n+1
+          | (R n)::_ when n < num_of_regs -> R (n+1) , stack_slots
+          | (M _)::s                      -> allocate' s
+          | _                             -> S 0     , 1
+          in
+          allocate' stack
       in
       x, {< stack_slots = max n stack_slots; stack = x::stack >}
 
@@ -185,4 +233,3 @@ let build prog name =
   close_out outf;
   let inc = try Sys.getenv "RC_RUNTIME" with _ -> "../runtime" in
   Sys.command (Printf.sprintf "gcc -m32 -o %s %s/runtime.o %s.s" name inc name)
- 
